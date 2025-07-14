@@ -174,11 +174,17 @@ def get_window_stats(events):
     app_usage = {}
     total_duration = 0
     
+    # 首先分析duration的单位
+    duration_unit = detect_duration_unit(events)
+    
     for event in events:
         data = event.get('data', {})
         app_name = data.get('app', 'Unknown')
         title = data.get('title', 'Unknown')
-        duration = event.get('duration', 0)
+        raw_duration = event.get('duration', 0)
+        
+        # 转换duration为秒
+        duration_seconds = convert_duration_to_seconds(raw_duration, duration_unit)
         
         if app_name not in app_usage:
             app_usage[app_name] = {
@@ -187,10 +193,10 @@ def get_window_stats(events):
                 'titles': set()
             }
         
-        app_usage[app_name]['total_duration'] += duration
+        app_usage[app_name]['total_duration'] += duration_seconds
         app_usage[app_name]['count'] += 1
         app_usage[app_name]['titles'].add(title)
-        total_duration += duration
+        total_duration += duration_seconds
     
     # 转换为可序列化的格式
     for app in app_usage:
@@ -199,9 +205,40 @@ def get_window_stats(events):
     
     return {
         'total_events': len(events),
-        'total_duration': total_duration,
+        'total_duration': total_duration,  # 现在是秒为单位
+        'duration_unit': duration_unit,
         'app_usage': app_usage
     }
+
+def detect_duration_unit(events):
+    """检测事件持续时间的单位"""
+    if not events:
+        return 'seconds'
+    
+    # 取样本事件分析
+    sample_size = min(10, len(events))
+    total_duration = sum(event.get('duration', 0) for event in events[:sample_size])
+    avg_duration = total_duration / sample_size if sample_size > 0 else 0
+    
+    # 根据平均持续时间判断单位
+    if avg_duration < 100:  # 可能是秒
+        return 'seconds'
+    elif avg_duration < 100000:  # 可能是毫秒
+        return 'milliseconds'
+    else:  # 可能是微秒或纳秒
+        return 'microseconds'
+
+def convert_duration_to_seconds(duration, unit):
+    """将持续时间转换为秒"""
+    if unit == 'seconds':
+        return duration
+    elif unit == 'milliseconds':
+        return duration / 1000
+    elif unit == 'microseconds':
+        return duration / 1000000
+    else:
+        # 默认假设是秒
+        return duration
 
 @app.route('/')
 def index():
@@ -287,6 +324,7 @@ def index():
     else:
         total_hours = round(stats.get('total_duration', 0) / 3600, 2)
         total_minutes = round(stats.get('total_duration', 0) / 60, 2)
+        duration_unit = stats.get('duration_unit', 'seconds')
         
         html += f"""
             <div class="stats">
@@ -306,7 +344,7 @@ def index():
                 <div class="stat-card">
                     <h3>📋 时间段</h3>
                     <h2>{current_time_label}</h2>
-                    <small>过去 {current_time_label} 的数据</small>
+                    <small>检测单位: {duration_unit}</small>
                 </div>
             </div>
             
@@ -458,6 +496,49 @@ def debug_events():
                     event_info['parse_error'] = str(e)
             
             debug_info['sample_events'].append(event_info)
+        
+        return jsonify(debug_info)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@app.route('/debug/durations')
+def debug_durations():
+    """调试事件持续时间格式"""
+    url = f"{BASE_URL}/buckets/{BUCKET_ID}/events"
+    
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        all_events = resp.json()
+        
+        # 分析前几个事件的持续时间
+        sample_events = all_events[:10] if all_events else []
+        
+        durations = []
+        total_sample_duration = 0
+        
+        for i, event in enumerate(sample_events):
+            duration = event.get('duration', 0)
+            durations.append({
+                'index': i,
+                'duration': duration,
+                'timestamp': event.get('timestamp'),
+                'app': event.get('data', {}).get('app', 'Unknown')
+            })
+            total_sample_duration += duration
+        
+        debug_info = {
+            'total_events': len(all_events),
+            'sample_durations': durations,
+            'total_sample_duration': total_sample_duration,
+            'avg_duration': total_sample_duration / len(sample_events) if sample_events else 0,
+            'duration_analysis': {
+                'min_duration': min([d['duration'] for d in durations]) if durations else 0,
+                'max_duration': max([d['duration'] for d in durations]) if durations else 0,
+                'estimated_unit': 'seconds' if total_sample_duration < 1000 else 'milliseconds' if total_sample_duration < 1000000 else 'microseconds'
+            }
+        }
         
         return jsonify(debug_info)
         
